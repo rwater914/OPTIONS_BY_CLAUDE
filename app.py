@@ -79,7 +79,14 @@ for dte in dte_targets:
             "POP %": sp["pop"] if sp else "-",
         })
 
-st.dataframe(pd.DataFrame(bps_rows), use_container_width=True, hide_index=True)
+if bps_rows:
+    st.dataframe(pd.DataFrame(bps_rows), use_container_width=True, hide_index=True)
+else:
+    st.warning(
+        "Couldn't pull any expirations/chain data for this ticker right now — Yahoo Finance may be "
+        "rate-limiting or temporarily unreachable (this is more common on cloud-hosted deployments "
+        "than running locally). Try again in a minute, or verify locally with `streamlit run app.py`."
+    )
 
 # ----------------------------------------------------------------------
 # SECTION: Predicted trading range
@@ -123,8 +130,8 @@ st.caption(
     "from the news/rationale, not just a bigger credit."
 )
 
-WATCHLIST = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "META",
-             "GOOGL", "AMZN", "F", "INTC", "PLTR", "SOFI", "BAC", "XOM", "DIS"]
+WATCHLIST = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "META",
+             "F", "INTC", "SOFI", "XOM"]
 
 @st.cache_data(ttl=600)
 def scan_watchlist_for_pick(tickers, dte_lo=28, dte_hi=45):
@@ -155,6 +162,13 @@ def scan_watchlist_for_pick(tickers, dte_lo=28, dte_hi=45):
 
 with st.spinner("Scanning watchlist for the best bull put spread premium..."):
     pick_candidates = scan_watchlist_for_pick(WATCHLIST)
+
+if not pick_candidates:
+    st.warning(
+        "Couldn't pull live chain data for any watchlist ticker right now — Yahoo Finance may be "
+        "rate-limiting or temporarily unreachable (this is more common on cloud-hosted deployments "
+        "than running locally). Try again shortly, or verify locally with `streamlit run app.py`."
+    )
 
 under20 = [c for c in pick_candidates if c["short_delta"] < 0.20 and c["pop"] >= 65]
 if under20:
@@ -195,11 +209,16 @@ if high_conv:
 
 st.header("💡 Poor Man's Pick")
 st.caption("Best available defined-risk trade for a low-AUM account, targeting ≥70% POP. "
-           "DTE and structure (spread vs. condor) chosen for best fit.")
+           "DTE and structure chosen for best fit — this deliberately isn't limited to bull put "
+           "spreads; an iron condor is considered too when it lands closer to the target margin "
+           "at the same POP bar.")
 
 def scan_for_margin_target(ticker, expirations, target_margin, min_pop=70):
-    """Scan several DTEs/deltas for a bull put spread whose max loss lands
-    near the target margin with POP above the threshold."""
+    """Scan several DTEs/deltas/widths across BOTH bull put spreads and iron
+    condors for whichever structure's max loss lands closest to the target
+    margin while clearing min_pop. Bull put spreads aren't the only option
+    for a low-AUM account — a condor can sometimes fit a tight margin target
+    better for a similar POP."""
     best = None
     best_score = 1e9
     for dte in [7, 14, 21, 30, 41]:
@@ -207,29 +226,40 @@ def scan_for_margin_target(ticker, expirations, target_margin, min_pop=70):
         if exp is None:
             continue
         T = days_to(exp) / 365
-        puts, _ = get_chain(ticker, exp)
+        puts, calls = get_chain(ticker, exp)
+
         for dl in [0.30, 0.25, 0.20, 0.16, 0.13, 0.11, 0.10]:
             for width in [1, 2, 2.5, 5]:
                 sp = build_bull_put_spread(puts, S, T, dl, width=width)
-                if sp is None or sp["pop"] < min_pop:
+                if sp is None or sp["pop"] < min_pop or sp["max_loss"] <= 0:
                     continue
                 score = abs(sp["max_loss"] - target_margin)
                 if score < best_score:
                     best_score = score
-                    best = {**sp, "dte": days_to(exp), "expiration": exp, "delta_target": dl}
+                    best = {**sp, "dte": days_to(exp), "expiration": exp}
+
+        for dl in [0.20, 0.16, 0.13, 0.11, 0.10, 0.08]:
+            for width in [1, 2, 2.5, 5]:
+                ic = build_iron_condor(puts, calls, S, T, dl, width=width)
+                if ic is None or ic["pop"] < min_pop or ic["max_loss"] <= 0:
+                    continue
+                score = abs(ic["max_loss"] - target_margin)
+                if score < best_score:
+                    best_score = score
+                    best = {**ic, "dte": days_to(exp), "expiration": exp}
     return best
 
 for margin in (200, 100):
     pick = scan_for_margin_target(ticker, expirations, margin)
     st.subheader(f"${margin} Margin Pick")
     if pick:
-        st.write(
-            f"**{ticker} Bull Put Spread** — Exp {pick['expiration']} ({pick['dte']} DTE)  \n"
-            f"Sell {pick['short_strike']}P / Buy {pick['long_strike']}P  \n"
-            f"Credit: ${pick['credit']} | Max Loss: ${pick['max_loss']} | POP ≈ {pick['pop']}%"
-        )
+        detail = fmt_spread(pick) if pick["type"] == "Bull Put Spread" else fmt_condor(pick)
+        st.write(f"**{ticker} {pick['type']}** — Exp {pick['expiration']} ({pick['dte']} DTE)  \n{detail}")
+        if pick["type"] == "Iron Condor":
+            st.caption("An iron condor was picked over a bull put spread here — it landed closer to the "
+                       "target margin at the required POP by collecting premium on both sides.")
     else:
-        st.write(f"No bull put spread near ${margin} margin cleared 70% POP with this chain. "
+        st.write(f"No bull put spread or iron condor near ${margin} margin cleared 70% POP with this chain. "
                  "Consider a further-OTM single cash-secured put or a smaller-width spread on a lower-priced ticker instead.")
 
 st.caption("If nothing in the chain meaningfully fits the $100–$200 margin bucket at ≥70% POP, a cash-secured put "

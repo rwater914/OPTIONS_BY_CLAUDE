@@ -14,7 +14,9 @@ using Black-Scholes delta and lognormal probability-of-profit (POP) math:
   (not just the ticker you typed in) for the richest bull put spread premium at ~30-45 DTE,
   short-leg delta under 0.20, plus a higher-delta "high conviction" alternate when one name's
   premium stands out, with the news headlines behind it
-- **Poor Man's Pick** — best ~$200 and ~$100 margin trade at ≥70% POP
+- **Poor Man's Pick** — best ~$200 and ~$100 margin trade at ≥70% POP, scanning both bull put
+  spreads and iron condors and picking whichever structure lands closer to the margin target
+  ("you can suggest going outside of the bull put spread if that is more beneficial")
 - **Iron Condor Candidates** at 1/7/14/42 DTE (Friday expirations preferred), plus a
   "Today's Pick" bull put spread and iron condor (≥80% POP condor)
 - **Short Term 0–7 Day Plays** — 4 higher-risk picks at ≥72% POP, color-highlighted, with a
@@ -47,12 +49,21 @@ exists in one place.
   fabricating numbers. SPY, being a regular exchange-listed ETF, works normally.
 - Very low-priced or thinly-traded tickers may not have strikes tight enough to hit
   a clean $100/$200 margin target; in that case the Poor Man's Pick section will say so.
+- **Every live Yahoo Finance call in `optionmath.py` (price, expirations, chain, news) retries
+  a couple of times with backoff and fails gracefully** (a clear `st.warning`/`st.error`
+  message) instead of crashing the page with a raw traceback. Cloud-hosted deployments
+  (Streamlit Community Cloud, Render, etc.) are more prone to Yahoo Finance rate-limiting or
+  transient blocks than a local run — if a section shows a "couldn't pull data" warning,
+  that's this fallback working as intended, not a bug; try again in a minute, or verify
+  locally first with `streamlit run app.py`.
 - This was built and revised without live internet access to Yahoo Finance in the
   environment it was written in. The option-math logic (delta targeting, POP tiering,
-  spread/condor construction) was verified with `streamlit.testing.v1.AppTest` against a
-  synthetic option chain (catching and fixing a real argument-order bug in the process —
-  see git history), but the app has not yet been run against a real, live Yahoo Finance
-  feed. Sanity-check it against real numbers before trusting it (see below).
+  spread/condor construction) and the network-failure fallback behavior above were both
+  verified with `streamlit.testing.v1.AppTest` against synthetic option-chain data — one
+  run with a normal chain, one with every yfinance call simulated as failing outright — which
+  caught and fixed a real argument-order bug in the process (see git history). The app has
+  not yet been run against a real, live Yahoo Finance feed, so sanity-check actual numbers
+  against your broker before trusting them (see below).
 
 ## Run it locally first
 ```bash

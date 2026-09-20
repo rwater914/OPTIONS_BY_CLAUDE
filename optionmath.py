@@ -12,13 +12,38 @@ Nothing here is a recommendation to buy or sell anything. Verify all numbers
 with your own broker's live quotes before placing any trade.
 """
 
+import time
+
 import streamlit as st
 import yfinance as yf
 import numpy as np
+import pandas as pd
 from scipy.stats import norm
 from datetime import datetime, timedelta
 
 R = 0.045  # rough risk-free rate assumption (3-mo T-bill ballpark)
+
+EMPTY_CHAIN_COLS = ["strike", "impliedVolatility", "bid", "ask", "lastPrice"]
+
+
+def _with_retries(fn, attempts=3, base_delay=0.6):
+    """Run fn() with a few retries + short backoff, then re-raise the last
+    error if every attempt failed. Yahoo/yfinance calls are flaky in practice
+    (rate limits, transient network errors, especially from cloud-hosted
+    IPs) — every live data fetch in this module goes through this instead of
+    calling yfinance directly, so a transient hiccup gets a couple of retries
+    before the caller falls back to its own "no data" default rather than
+    crashing the whole Streamlit page with a raw traceback."""
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - deliberately broad: any
+            # yfinance/network failure should degrade gracefully, not crash.
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(base_delay * (2 ** attempt))
+    raise last_exc
 
 # ----------------------------------------------------------------------
 # MATH
@@ -56,8 +81,11 @@ def expected_move(S, sigma, days):
 
 @st.cache_data(ttl=300)
 def get_price(ticker):
-    hist = yf.Ticker(ticker).history(period="5d")
-    if hist.empty:
+    try:
+        hist = _with_retries(lambda: yf.Ticker(ticker).history(period="5d"))
+    except Exception:
+        return None
+    if hist is None or hist.empty:
         return None
     return float(hist["Close"].iloc[-1])
 
@@ -65,39 +93,47 @@ def get_price(ticker):
 def get_avg_iv_proxy(ticker):
     """Rough IV proxy from the nearest-to-30-day ATM option, used for the
     predicted-range section."""
-    tk = yf.Ticker(ticker)
-    exps = tk.options
-    if not exps:
+    try:
+        exps = get_expirations(ticker)
+        if not exps:
+            return None
+        target = pick_expiration(exps, 30)
+        if target is None:
+            return None
+        puts, calls = get_chain(ticker, target)
+        S = get_price(ticker)
+        if S is None or calls.empty:
+            return None
+        calls = calls.copy()
+        calls["diff"] = (calls["strike"] - S).abs()
+        atm = calls.sort_values("diff").iloc[0]
+        iv = atm.get("impliedVolatility", None)
+        return float(iv) if iv and iv > 0 else None
+    except Exception:
         return None
-    target = pick_expiration(exps, 30)
-    if target is None:
-        return None
-    puts, calls = get_chain(ticker, target)
-    S = get_price(ticker)
-    if S is None or calls.empty:
-        return None
-    calls = calls.copy()
-    calls["diff"] = (calls["strike"] - S).abs()
-    atm = calls.sort_values("diff").iloc[0]
-    iv = atm.get("impliedVolatility", None)
-    return float(iv) if iv and iv > 0 else None
 
 @st.cache_data(ttl=300)
 def get_expirations(ticker):
     try:
-        return yf.Ticker(ticker).options
+        exps = _with_retries(lambda: yf.Ticker(ticker).options)
+        return exps or []
     except Exception:
         return []
 
 @st.cache_data(ttl=300)
 def get_chain(ticker, expiration):
-    chain = yf.Ticker(ticker).option_chain(expiration)
-    return chain.puts, chain.calls
+    try:
+        chain = _with_retries(lambda: yf.Ticker(ticker).option_chain(expiration))
+        puts = chain.puts if chain is not None else pd.DataFrame(columns=EMPTY_CHAIN_COLS)
+        calls = chain.calls if chain is not None else pd.DataFrame(columns=EMPTY_CHAIN_COLS)
+        return puts, calls
+    except Exception:
+        return pd.DataFrame(columns=EMPTY_CHAIN_COLS), pd.DataFrame(columns=EMPTY_CHAIN_COLS)
 
 @st.cache_data(ttl=900)
 def get_news(ticker, limit=4):
     try:
-        news = yf.Ticker(ticker).news
+        news = _with_retries(lambda: yf.Ticker(ticker).news, attempts=2) or []
         out = []
         for n in news[:limit]:
             title = n.get("title") or (n.get("content") or {}).get("title")
