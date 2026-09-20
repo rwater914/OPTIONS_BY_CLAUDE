@@ -3,251 +3,27 @@ Options Income Dashboard
 =========================
 EDUCATIONAL / DECISION-SUPPORT TOOL. NOT FINANCIAL ADVICE.
 
-Data source: Yahoo Finance via `yfinance` (free, no API key).
-Yahoo does not hand out option Greeks directly, so this app computes
-delta and probability-of-profit (POP) itself using each contract's
-implied volatility (as reported by Yahoo) plugged into the standard
-Black-Scholes / lognormal model. This is the same underlying math
-most retail platforms (thinkorswim, tastytrade) use.
+Data source: Yahoo Finance via `yfinance` (free, no API key). See
+optionmath.py for the Black-Scholes / lognormal math used to compute
+delta and probability-of-profit (POP) locally, since Yahoo doesn't hand
+out option Greeks directly.
 
-Nothing in this app is a recommendation to buy or sell anything.
-Options involve substantial risk of loss. Verify all numbers with
-your own broker's live quotes before placing any trade.
+Nothing in this app is a recommendation to buy or sell anything. Options
+involve substantial risk of loss. Verify all numbers with your own
+broker's live quotes before placing any trade.
 """
 
 import streamlit as st
-import yfinance as yf
-import numpy as np
-from scipy.stats import norm
-from datetime import datetime, timedelta
+from datetime import datetime
 import pandas as pd
 
+from optionmath import (
+    get_price, get_avg_iv_proxy, get_expirations, get_chain, get_news,
+    pick_expiration, days_to, build_bull_put_spread, build_iron_condor,
+    fmt_spread, fmt_condor, color_block, expected_move,
+)
+
 st.set_page_config(page_title="Options Income Dashboard", layout="wide")
-
-R = 0.045  # rough risk-free rate assumption (3-mo T-bill ballpark)
-
-# ----------------------------------------------------------------------
-# MATH
-# ----------------------------------------------------------------------
-
-def bs_put_delta(S, K, T, sigma):
-    if T <= 0 or sigma <= 0:
-        return -1.0 if S < K else 0.0
-    d1 = (np.log(S / K) + (R + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    return norm.cdf(d1) - 1
-
-def bs_call_delta(S, K, T, sigma):
-    if T <= 0 or sigma <= 0:
-        return 1.0 if S > K else 0.0
-    d1 = (np.log(S / K) + (R + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    return norm.cdf(d1)
-
-def prob_above(S, K, T, sigma):
-    """Risk-neutral probability price finishes above K at expiration."""
-    if T <= 0 or sigma <= 0:
-        return 1.0 if S > K else 0.0
-    d2 = (np.log(S / K) + (R - 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    return norm.cdf(d2)
-
-def prob_below(S, K, T, sigma):
-    return 1 - prob_above(S, K, T, sigma)
-
-def expected_move(S, sigma, days):
-    T = days / 365
-    return S * sigma * np.sqrt(T)
-
-# ----------------------------------------------------------------------
-# DATA
-# ----------------------------------------------------------------------
-
-@st.cache_data(ttl=300)
-def get_price(ticker):
-    hist = yf.Ticker(ticker).history(period="5d")
-    if hist.empty:
-        return None
-    return float(hist["Close"].iloc[-1])
-
-@st.cache_data(ttl=300)
-def get_avg_iv_proxy(ticker):
-    """Rough IV proxy from the nearest-to-30-day ATM option, used for the
-    predicted-range section."""
-    tk = yf.Ticker(ticker)
-    exps = tk.options
-    if not exps:
-        return None
-    target = pick_expiration(exps, 30)
-    if target is None:
-        return None
-    puts, calls = get_chain(ticker, target)
-    S = get_price(ticker)
-    if S is None or calls.empty:
-        return None
-    calls = calls.copy()
-    calls["diff"] = (calls["strike"] - S).abs()
-    atm = calls.sort_values("diff").iloc[0]
-    iv = atm.get("impliedVolatility", None)
-    return float(iv) if iv and iv > 0 else None
-
-@st.cache_data(ttl=300)
-def get_expirations(ticker):
-    try:
-        return yf.Ticker(ticker).options
-    except Exception:
-        return []
-
-@st.cache_data(ttl=300)
-def get_chain(ticker, expiration):
-    chain = yf.Ticker(ticker).option_chain(expiration)
-    return chain.puts, chain.calls
-
-@st.cache_data(ttl=900)
-def get_news(ticker, limit=4):
-    try:
-        news = yf.Ticker(ticker).news
-        out = []
-        for n in news[:limit]:
-            title = n.get("title") or (n.get("content") or {}).get("title")
-            if title:
-                out.append(title)
-        return out
-    except Exception:
-        return []
-
-def pick_expiration(expirations, target_days, prefer_friday=True):
-    if not expirations:
-        return None
-    today = datetime.now().date()
-    target = today + timedelta(days=target_days)
-    valid = [e for e in expirations if datetime.strptime(e, "%Y-%m-%d").date() >= today]
-    if not valid:
-        return None
-    def score(e):
-        d = datetime.strptime(e, "%Y-%m-%d").date()
-        s = abs((d - target).days)
-        if prefer_friday and d.weekday() != 4:
-            s += 1.5
-        return s
-    return sorted(valid, key=score)[0]
-
-def days_to(expiration):
-    d = datetime.strptime(expiration, "%Y-%m-%d").date()
-    return max((d - datetime.now().date()).days, 0)
-
-def find_put_by_delta(puts, S, T, target_delta):
-    best, best_diff = None, 999
-    for _, row in puts.iterrows():
-        iv = row.get("impliedVolatility", 0)
-        if not iv or iv <= 0:
-            continue
-        d = bs_put_delta(S, row["strike"], T, iv)
-        diff = abs(abs(d) - target_delta)
-        if diff < best_diff:
-            best_diff, best = diff, row
-    return best
-
-def find_call_by_delta(calls, S, T, target_delta):
-    best, best_diff = None, 999
-    for _, row in calls.iterrows():
-        iv = row.get("impliedVolatility", 0)
-        if not iv or iv <= 0:
-            continue
-        d = bs_call_delta(S, row["strike"], T, iv)
-        diff = abs(d - target_delta)
-        if diff < best_diff:
-            best_diff, best = diff, row
-    return best
-
-def mid_credit(short_row, long_row):
-    s_bid = short_row.get("bid", 0) or 0
-    l_ask = long_row.get("ask", 0) or 0
-    credit = s_bid - l_ask
-    if credit <= 0:
-        credit = max(0.05, (short_row.get("lastPrice", 0) or 0) - (long_row.get("lastPrice", 0) or 0))
-    return round(credit, 2)
-
-def build_bull_put_spread(puts, S, T, short_delta, long_delta=None, width=None):
-    short_leg = find_put_by_delta(puts, S, T, short_delta)
-    if short_leg is None:
-        return None
-    if long_delta is not None:
-        long_leg = find_put_by_delta(puts, S, T, long_delta)
-    else:
-        target_strike = short_leg["strike"] - (width or max(1, round(S * 0.01)))
-        cands = puts[puts["strike"] < short_leg["strike"]]
-        if cands.empty:
-            return None
-        long_leg = cands.iloc[(cands["strike"] - target_strike).abs().argsort().iloc[0]]
-    if long_leg is None or long_leg["strike"] >= short_leg["strike"]:
-        return None
-    credit = mid_credit(short_leg, long_leg)
-    spread_width = round(short_leg["strike"] - long_leg["strike"], 2)
-    max_loss = round(max(spread_width - credit, 0.01) * 100, 2)
-    iv = short_leg.get("impliedVolatility", 0.3)
-    breakeven = short_leg["strike"] - credit
-    pop = round(prob_above(S, breakeven, T, iv) * 100, 1)
-    return {
-        "type": "Bull Put Spread",
-        "short_strike": short_leg["strike"], "long_strike": long_leg["strike"],
-        "credit": credit, "width": spread_width, "max_loss": max_loss,
-        "max_gain": round(credit * 100, 2), "pop": pop,
-        "short_delta": round(abs(bs_put_delta(S, short_leg["strike"], T, iv)), 3),
-        "breakeven": round(breakeven, 2),
-    }
-
-def build_iron_condor(puts, calls, S, T, put_delta, call_delta=None, width=None):
-    call_delta = call_delta or put_delta
-    put_short = find_put_by_delta(puts, S, T, put_delta)
-    call_short = find_call_by_delta(calls, S, T, call_delta)
-    if put_short is None or call_short is None:
-        return None
-    w = width or max(1, round(S * 0.01))
-    put_cands = puts[puts["strike"] < put_short["strike"]]
-    call_cands = calls[calls["strike"] > call_short["strike"]]
-    if put_cands.empty or call_cands.empty:
-        return None
-    put_long = put_cands.iloc[(put_cands["strike"] - (put_short["strike"] - w)).abs().argsort().iloc[0]]
-    call_long = call_cands.iloc[(call_cands["strike"] - (call_short["strike"] + w)).abs().argsort().iloc[0]]
-    put_credit = mid_credit(put_short, put_long)
-    call_credit = mid_credit(call_short, call_long)
-    total_credit = round(put_credit + call_credit, 2)
-    put_width = round(put_short["strike"] - put_long["strike"], 2)
-    call_width = round(call_long["strike"] - call_short["strike"], 2)
-    max_loss = round((max(put_width, call_width) - total_credit) * 100, 2)
-    iv_p = put_short.get("impliedVolatility", 0.3)
-    iv_c = call_short.get("impliedVolatility", 0.3)
-    lower_be = put_short["strike"] - total_credit
-    upper_be = call_short["strike"] + total_credit
-    pop = round((prob_above(S, lower_be, T, iv_p) - prob_above(S, upper_be, T, iv_c)) * 100, 1)
-    return {
-        "type": "Iron Condor",
-        "put_short": put_short["strike"], "put_long": put_long["strike"],
-        "call_short": call_short["strike"], "call_long": call_long["strike"],
-        "credit": total_credit, "max_loss": max(max_loss, 1),
-        "max_gain": round(total_credit * 100, 2), "pop": pop,
-        "lower_be": round(lower_be, 2), "upper_be": round(upper_be, 2),
-    }
-
-def fmt_spread(sp):
-    if sp is None:
-        return "No valid contracts found for this expiration/delta combo."
-    return (f"Sell {sp['short_strike']}P / Buy {sp['long_strike']}P — "
-            f"Credit ${sp['credit']} | Max Loss ${sp['max_loss']} | "
-            f"Max Gain ${sp['max_gain']} | POP ≈ {sp['pop']}% | Δshort ≈ {sp['short_delta']}")
-
-def fmt_condor(c):
-    if c is None:
-        return "No valid contracts found for this expiration/delta combo."
-    return (f"Puts: Sell {c['put_short']}/Buy {c['put_long']} · "
-            f"Calls: Sell {c['call_short']}/Buy {c['call_long']} — "
-            f"Credit ${c['credit']} | Max Loss ${c['max_loss']} | "
-            f"Max Gain ${c['max_gain']} | POP ≈ {c['pop']}%")
-
-def color_block(html, bg, border):
-    st.markdown(
-        f"""<div style="background-color:{bg};border-left:6px solid {border};
-        padding:14px 18px;border-radius:8px;margin-bottom:10px;">{html}</div>""",
-        unsafe_allow_html=True,
-    )
 
 # ----------------------------------------------------------------------
 # UI — HEADER / TICKER
@@ -333,6 +109,85 @@ else:
     st.write("No recent headlines pulled for this ticker. Check your broker/news terminal directly.")
 st.caption("Headlines are pulled live from Yahoo Finance's news feed for this ticker — cross-check anything "
            "market-moving (Fed meetings, CPI, earnings, geopolitical events) against a primary news source.")
+
+# ----------------------------------------------------------------------
+# SECTION: Today's Stock Pick (cross-ticker scan, not just the ticker above)
+# ----------------------------------------------------------------------
+
+st.header("🔎 Today's Stock Pick — Best Bull Put Spread Premium")
+st.caption(
+    "This is Claude's own pick, scanned across a watchlist of liquid, optionable names — not "
+    "necessarily the ticker entered above. Looking for decent premium at ~30-45 DTE with the "
+    "short-leg delta under 0.20. A separate, higher-delta 'high conviction' alternate is also "
+    "shown when a name stands out with unusually rich premium — that one needs real conviction "
+    "from the news/rationale, not just a bigger credit."
+)
+
+WATCHLIST = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "META",
+             "GOOGL", "AMZN", "F", "INTC", "PLTR", "SOFI", "BAC", "XOM", "DIS"]
+
+@st.cache_data(ttl=600)
+def scan_watchlist_for_pick(tickers, dte_lo=28, dte_hi=45):
+    candidates = []
+    for t in tickers:
+        try:
+            px = get_price(t)
+            exps = get_expirations(t)
+            if px is None or not exps:
+                continue
+            exp = pick_expiration(exps, 35)
+            if exp is None:
+                continue
+            dte = days_to(exp)
+            if dte < dte_lo or dte > dte_hi:
+                continue
+            T = dte / 365
+            puts, _ = get_chain(t, exp)
+            for dl in [0.20, 0.18, 0.16, 0.13, 0.11, 0.10, 0.08]:
+                sp = build_bull_put_spread(puts, px, T, dl)
+                if sp is None or sp["max_loss"] <= 0:
+                    continue
+                ror = sp["credit"] * 100 / sp["max_loss"]
+                candidates.append({"ticker": t, "exp": exp, "dte": dte, "ror": ror, **sp})
+        except Exception:
+            continue
+    return candidates
+
+with st.spinner("Scanning watchlist for the best bull put spread premium..."):
+    pick_candidates = scan_watchlist_for_pick(WATCHLIST)
+
+under20 = [c for c in pick_candidates if c["short_delta"] < 0.20 and c["pop"] >= 65]
+if under20:
+    best_pick = max(under20, key=lambda c: c["ror"])
+    st.subheader(f"Pick: {best_pick['ticker']}")
+    st.write(
+        f"**{best_pick['ticker']} Bull Put Spread** — Exp {best_pick['exp']} ({best_pick['dte']} DTE)  \n"
+        f"{fmt_spread(best_pick)}  \n"
+        f"Return on margin ≈ {best_pick['ror']:.1f}%"
+    )
+    pick_news = get_news(best_pick["ticker"], limit=3)
+    if pick_news:
+        st.write("Rationale / recent news:")
+        for h in pick_news:
+            st.write(f"• {h}")
+else:
+    st.write("No watchlist name cleared a clean sub-0.20Δ setup with decent premium right now.")
+
+high_conv = [c for c in pick_candidates if 0.20 <= c["short_delta"] <= 0.32 and c["pop"] >= 60]
+if high_conv:
+    alt_pick = max(high_conv, key=lambda c: c["ror"])
+    st.subheader(f"Alternate (higher delta, richer premium): {alt_pick['ticker']}")
+    st.write(
+        f"**{alt_pick['ticker']} Bull Put Spread** — Exp {alt_pick['exp']} ({alt_pick['dte']} DTE)  \n"
+        f"{fmt_spread(alt_pick)}  \n"
+        f"Return on margin ≈ {alt_pick['ror']:.1f}%"
+    )
+    st.caption("Delta is above the usual 0.20 ceiling — only take this if the news/rationale below "
+               "gives real conviction, not just because the premium is bigger.")
+    alt_news = get_news(alt_pick["ticker"], limit=3)
+    if alt_news:
+        for h in alt_news:
+            st.write(f"• {h}")
 
 # ----------------------------------------------------------------------
 # SECTION: Poor Man's Pick ($200 and $100 margin)
@@ -426,8 +281,9 @@ else:
              "for an 80% structure right now.")
 
 st.subheader("🎯 Today's Pick — Bull Put Spread")
-bps_pick = build_bull_put_spread(*get_chain(ticker, pick_expiration(expirations, 30)), S,
-                                  days_to(pick_expiration(expirations, 30)) / 365, 0.20)
+bps_pick_exp = pick_expiration(expirations, 30)
+bps_pick_puts, _ = get_chain(ticker, bps_pick_exp)
+bps_pick = build_bull_put_spread(bps_pick_puts, S, days_to(bps_pick_exp) / 365, 0.20)
 st.write(f"**{ticker} Bull Put Spread** (30 DTE, ~0.20Δ) — " + fmt_spread(bps_pick))
 
 # ----------------------------------------------------------------------
@@ -535,6 +391,12 @@ else:
 
 st.caption("Weekend plays rely on time decay accruing over Sat/Sun with no offsetting price movement — they can "
            "still lose if the stock gaps on Monday's open (earnings, news, macro data due over the weekend).")
+
+st.markdown("---")
+st.info(
+    "📊 Want SPX/SPY-specific 0/1/3 DTE tiered plays (>70%/>80%/>90% POP) and a broad-market SPY/VIX "
+    "range read? See the **SPY / VIX Predictor** and **SPX / SPY Index Tiers** pages in the sidebar."
+)
 
 st.markdown("---")
 st.caption(
