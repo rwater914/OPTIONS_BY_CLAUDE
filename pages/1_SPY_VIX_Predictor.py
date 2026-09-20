@@ -20,11 +20,17 @@ st.caption(
 
 @st.cache_data(ttl=300)
 def get_hist(ticker, period="6mo"):
-    return yf.Ticker(ticker).history(period=period)
+    try:
+        return yf.Ticker(ticker).history(period=period)
+    except Exception:
+        return pd.DataFrame()
 
 @st.cache_data(ttl=300)
 def get_last(ticker):
-    h = yf.Ticker(ticker).history(period="5d")
+    try:
+        h = yf.Ticker(ticker).history(period="5d")
+    except Exception:
+        return None
     return float(h["Close"].iloc[-1]) if not h.empty else None
 
 spy = get_last("SPY")

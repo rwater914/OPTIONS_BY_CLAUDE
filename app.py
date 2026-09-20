@@ -25,6 +25,7 @@ import pandas as pd
 st.set_page_config(page_title="Options Income Dashboard", layout="wide")
 
 R = 0.045  # rough risk-free rate assumption (3-mo T-bill ballpark)
+MIN_POP = 70  # every trade shown anywhere in this app must clear this POP% bar
 
 # ----------------------------------------------------------------------
 # MATH
@@ -62,7 +63,10 @@ def expected_move(S, sigma, days):
 
 @st.cache_data(ttl=300)
 def get_price(ticker):
-    hist = yf.Ticker(ticker).history(period="5d")
+    try:
+        hist = yf.Ticker(ticker).history(period="5d")
+    except Exception:
+        return None
     if hist.empty:
         return None
     return float(hist["Close"].iloc[-1])
@@ -97,8 +101,12 @@ def get_expirations(ticker):
 
 @st.cache_data(ttl=300)
 def get_chain(ticker, expiration):
-    chain = yf.Ticker(ticker).option_chain(expiration)
-    return chain.puts, chain.calls
+    try:
+        chain = yf.Ticker(ticker).option_chain(expiration)
+        return chain.puts, chain.calls
+    except Exception:
+        empty = pd.DataFrame(columns=["strike", "bid", "ask", "lastPrice", "impliedVolatility"])
+        return empty, empty
 
 @st.cache_data(ttl=900)
 def get_news(ticker, limit=4):
@@ -249,6 +257,29 @@ def color_block(html, bg, border):
         unsafe_allow_html=True,
     )
 
+# POP color legend used everywhere in this app:
+#   POP >= 90%        -> GREEN  (high-confidence)
+#   70% <= POP < 90%   -> YELLOW (acceptable, per the >=70% POP floor)
+# Anything below MIN_POP is filtered out before it ever reaches the UI.
+POP_GREEN = ("#173629", "#2ecc71")
+POP_YELLOW = ("#3a331a", "#e0c23a")
+
+def pop_colors(pop):
+    return POP_GREEN if pop >= 90 else POP_YELLOW
+
+def pop_color_block(html, pop):
+    bg, border = pop_colors(pop)
+    color_block(html, bg, border)
+
+def style_pop_column(df, pop_col="POP %"):
+    """Return a pandas Styler that shades each row green/yellow by its POP value.
+    Rows without a numeric POP (already filtered to >=MIN_POP upstream) fall back to yellow."""
+    def row_style(row):
+        pop = row.get(pop_col, None)
+        bg, border = pop_colors(pop) if isinstance(pop, (int, float)) else POP_YELLOW
+        return [f"background-color:{bg};border-left:3px solid {border};color:#fafafa"] * len(row)
+    return df.style.apply(row_style, axis=1)
+
 # ----------------------------------------------------------------------
 # UI — HEADER / TICKER
 # ----------------------------------------------------------------------
@@ -258,6 +289,11 @@ st.caption(
     "Educational tool only — not financial advice. Numbers are computed live "
     "from Yahoo Finance option chains using Black-Scholes delta/POP math. "
     "Always confirm against your broker's live quotes before trading."
+)
+
+st.caption(
+    f"🟢 Green = POP ≥ 90%  ·  🟡 Yellow = POP 70–89%  ·  every trade below is pre-filtered "
+    f"to POP ≥ {MIN_POP}% — anything that didn't clear that bar is left off the page entirely."
 )
 
 ticker = st.text_input("Ticker to analyze", value="SPY").upper().strip()
@@ -279,12 +315,14 @@ st.metric(f"{ticker} Last Price", f"${S:,.2f}")
 # ----------------------------------------------------------------------
 
 st.header("Bull Put Spreads — by Target Delta & DTE")
-st.caption("Short-leg deltas requested: 0.20, 0.13, 0.11. DTEs: 7, 14, 21, 30, 41 (nearest available expiration, Fridays preferred).")
+st.caption(f"Short-leg deltas requested: 0.20, 0.13, 0.11. DTEs: 7, 14, 21, 30, 41 (nearest available expiration, "
+           f"Fridays preferred). Only combos clearing POP ≥ {MIN_POP}% are listed.")
 
 dte_targets = [7, 14, 21, 30, 41]
 delta_targets = [0.20, 0.13, 0.11]
 
 bps_rows = []
+skipped = 0
 for dte in dte_targets:
     exp = pick_expiration(expirations, dte)
     if exp is None:
@@ -293,17 +331,22 @@ for dte in dte_targets:
     puts, calls = get_chain(ticker, exp)
     for dl in delta_targets:
         sp = build_bull_put_spread(puts, S, T, dl)
+        if sp is None or sp["pop"] < MIN_POP:
+            skipped += 1
+            continue
         bps_rows.append({
             "Target DTE": dte, "Expiration": exp, "Actual DTE": days_to(exp),
             "Target Δ": dl,
-            "Short Strike": sp["short_strike"] if sp else "-",
-            "Long Strike": sp["long_strike"] if sp else "-",
-            "Credit": sp["credit"] if sp else "-",
-            "Max Loss": sp["max_loss"] if sp else "-",
-            "POP %": sp["pop"] if sp else "-",
+            "Short Strike": sp["short_strike"], "Long Strike": sp["long_strike"],
+            "Credit": sp["credit"], "Max Loss": sp["max_loss"], "POP %": sp["pop"],
         })
 
-st.dataframe(pd.DataFrame(bps_rows), use_container_width=True, hide_index=True)
+if bps_rows:
+    st.dataframe(style_pop_column(pd.DataFrame(bps_rows)), use_container_width=True, hide_index=True)
+else:
+    st.write(f"No DTE/delta combo cleared POP ≥ {MIN_POP}% on this chain right now.")
+if skipped:
+    st.caption(f"{skipped} combo(s) filtered out for POP < {MIN_POP}%.")
 
 # ----------------------------------------------------------------------
 # SECTION: Predicted trading range
@@ -339,10 +382,10 @@ st.caption("Headlines are pulled live from Yahoo Finance's news feed for this ti
 # ----------------------------------------------------------------------
 
 st.header("💡 Poor Man's Pick")
-st.caption("Best available defined-risk trade for a low-AUM account, targeting ≥70% POP. "
+st.caption(f"Best available defined-risk trade for a low-AUM account, targeting ≥{MIN_POP}% POP. "
            "DTE and structure (spread vs. condor) chosen for best fit.")
 
-def scan_for_margin_target(ticker, expirations, target_margin, min_pop=70):
+def scan_for_margin_target(ticker, expirations, target_margin, min_pop=MIN_POP):
     """Scan several DTEs/deltas for a bull put spread whose max loss lands
     near the target margin with POP above the threshold."""
     best = None
@@ -368,26 +411,29 @@ for margin in (200, 100):
     pick = scan_for_margin_target(ticker, expirations, margin)
     st.subheader(f"${margin} Margin Pick")
     if pick:
-        st.write(
-            f"**{ticker} Bull Put Spread** — Exp {pick['expiration']} ({pick['dte']} DTE)  \n"
-            f"Sell {pick['short_strike']}P / Buy {pick['long_strike']}P  \n"
-            f"Credit: ${pick['credit']} | Max Loss: ${pick['max_loss']} | POP ≈ {pick['pop']}%"
+        pop_color_block(
+            f"<b>{ticker} Bull Put Spread</b> — Exp {pick['expiration']} ({pick['dte']} DTE)<br>"
+            f"Sell {pick['short_strike']}P / Buy {pick['long_strike']}P<br>"
+            f"Credit: ${pick['credit']} | Max Loss: ${pick['max_loss']} | POP ≈ {pick['pop']}%",
+            pick["pop"],
         )
     else:
-        st.write(f"No bull put spread near ${margin} margin cleared 70% POP with this chain. "
+        st.write(f"No bull put spread near ${margin} margin cleared {MIN_POP}% POP with this chain. "
                  "Consider a further-OTM single cash-secured put or a smaller-width spread on a lower-priced ticker instead.")
 
-st.caption("If nothing in the chain meaningfully fits the $100–$200 margin bucket at ≥70% POP, a cash-secured put "
-           "on a lower-priced, liquid ticker (or a narrower-width spread) is usually the better fit than forcing a bad structure.")
+st.caption(f"If nothing in the chain meaningfully fits the $100–$200 margin bucket at ≥{MIN_POP}% POP, a cash-secured "
+           "put on a lower-priced, liquid ticker (or a narrower-width spread) is usually the better fit than forcing a bad structure.")
 
 # ----------------------------------------------------------------------
 # SECTION: Iron Condor Candidates
 # ----------------------------------------------------------------------
 
 st.header("Iron Condor Candidates")
-st.caption("Same ticker. DTEs: 1, 7, 14, 42 (Friday expirations preferred where available). Short-leg delta ≈ 0.16 both sides.")
+st.caption(f"Same ticker. DTEs: 1, 7, 14, 42 (Friday expirations preferred where available). Short-leg delta ≈ 0.16 "
+           f"both sides. Only expirations clearing POP ≥ {MIN_POP}% are listed.")
 
 ic_rows = []
+ic_skipped = 0
 for dte in [1, 7, 14, 42]:
     exp = pick_expiration(expirations, dte)
     if exp is None:
@@ -395,15 +441,21 @@ for dte in [1, 7, 14, 42]:
     T = days_to(exp) / 365
     puts, calls = get_chain(ticker, exp)
     ic = build_iron_condor(puts, calls, S, T, 0.16)
+    if ic is None or ic["pop"] < MIN_POP:
+        ic_skipped += 1
+        continue
     ic_rows.append({
         "Target DTE": dte, "Expiration": exp, "Actual DTE": days_to(exp),
-        "Put Short/Long": f"{ic['put_short']}/{ic['put_long']}" if ic else "-",
-        "Call Short/Long": f"{ic['call_short']}/{ic['call_long']}" if ic else "-",
-        "Credit": ic["credit"] if ic else "-",
-        "Max Loss": ic["max_loss"] if ic else "-",
-        "POP %": ic["pop"] if ic else "-",
+        "Put Short/Long": f"{ic['put_short']}/{ic['put_long']}",
+        "Call Short/Long": f"{ic['call_short']}/{ic['call_long']}",
+        "Credit": ic["credit"], "Max Loss": ic["max_loss"], "POP %": ic["pop"],
     })
-st.dataframe(pd.DataFrame(ic_rows), use_container_width=True, hide_index=True)
+if ic_rows:
+    st.dataframe(style_pop_column(pd.DataFrame(ic_rows)), use_container_width=True, hide_index=True)
+else:
+    st.write(f"No condor expiration cleared POP ≥ {MIN_POP}% on this chain right now.")
+if ic_skipped:
+    st.caption(f"{ic_skipped} expiration(s) filtered out for POP < {MIN_POP}%.")
 
 st.subheader("🎯 Today's Pick — Best Iron Condor (≥80% POP)")
 best_condor, best_condor_meta = None, None
@@ -419,16 +471,22 @@ for dte in [1, 7, 14, 21, 30, 41, 42]:
             if best_condor is None or ic["max_gain"] > best_condor["max_gain"]:
                 best_condor, best_condor_meta = ic, {"exp": exp, "dte": days_to(exp), "delta": dl}
 if best_condor:
-    st.write(f"**{ticker} Iron Condor** — Exp {best_condor_meta['exp']} ({best_condor_meta['dte']} DTE)  \n"
-             + fmt_condor(best_condor))
+    pop_color_block(f"<b>{ticker} Iron Condor</b> — Exp {best_condor_meta['exp']} ({best_condor_meta['dte']} DTE)<br>"
+                     + fmt_condor(best_condor), best_condor["pop"])
 else:
     st.write("No condor cleared 80% POP across scanned deltas/DTEs on this chain — market may be too volatile "
              "for an 80% structure right now.")
 
 st.subheader("🎯 Today's Pick — Bull Put Spread")
-bps_pick = build_bull_put_spread(*get_chain(ticker, pick_expiration(expirations, 30)), S,
-                                  days_to(pick_expiration(expirations, 30)) / 365, 0.20)
-st.write(f"**{ticker} Bull Put Spread** (30 DTE, ~0.20Δ) — " + fmt_spread(bps_pick))
+pick30_exp = pick_expiration(expirations, 30)
+bps_pick = None
+if pick30_exp:
+    puts30, _ = get_chain(ticker, pick30_exp)
+    bps_pick = build_bull_put_spread(puts30, S, days_to(pick30_exp) / 365, 0.20)
+if bps_pick and bps_pick["pop"] >= MIN_POP:
+    pop_color_block(f"<b>{ticker} Bull Put Spread</b> (30 DTE, ~0.20Δ)<br>" + fmt_spread(bps_pick), bps_pick["pop"])
+else:
+    st.write(f"The ~0.20Δ / 30 DTE bull put spread didn't clear POP ≥ {MIN_POP}% on this chain right now.")
 
 # ----------------------------------------------------------------------
 # SECTION: Short Term 0-7 Day Plays
@@ -452,17 +510,17 @@ for dte in [0, 1, 2, 3, 5, 7]:
         continue
     T = max(days_to(exp), 0.3) / 365
     puts, calls = get_chain(ticker, exp)
-    sp = build_bull_put_spread(puts, S, T, 0.15)  # ~0.15Δ short -> targeting >72% POP
-    if sp and sp["pop"] >= 72:
-        color_block(
+    sp = build_bull_put_spread(puts, S, T, 0.15)  # ~0.15Δ short -> targeting high POP
+    if sp and sp["pop"] >= MIN_POP:
+        pop_color_block(
             f"<b>Pick {count+1} — Bull Put Spread</b><br>Exp {exp} ({days_to(exp)} DTE)<br>"
             f"{fmt_spread(sp)}",
-            "#1f2e3a", "#4a90d9"
+            sp["pop"],
         )
         count += 1
 
 if count == 0:
-    st.write("No 0–7 DTE structure cleared the 72% POP bar on this chain right now.")
+    st.write(f"No 0–7 DTE structure cleared the {MIN_POP}% POP bar on this chain right now.")
 
 news_short = get_news(ticker, limit=3)
 st.markdown("**News/macro check for these short-dated picks:**")
@@ -489,24 +547,26 @@ if tt_exp:
     T = days_to(tt_exp) / 365
     puts, calls = get_chain(ticker, tt_exp)
     tt_bps = build_bull_put_spread(puts, S, T, 0.20, long_delta=0.13)
-    if tt_bps:
-        color_block(f"<b>TastyTrade Pick 1 — Bull Put Spread</b><br>Exp {tt_exp} ({days_to(tt_exp)} DTE, target 42)<br>"
-                     f"{fmt_spread(tt_bps)}<br><i>Plan: manage/close at 21 DTE.</i>", "#1f3a2e", "#4ad991")
+    if tt_bps and tt_bps["pop"] >= MIN_POP:
+        pop_color_block(f"<b>TastyTrade Pick 1 — Bull Put Spread</b><br>Exp {tt_exp} ({days_to(tt_exp)} DTE, target 42)<br>"
+                         f"{fmt_spread(tt_bps)}<br><i>Plan: manage/close at 21 DTE.</i>", tt_bps["pop"])
         tt_count += 1
     tt_ic = build_iron_condor(puts, calls, S, T, 0.16)
-    if tt_ic:
-        color_block(f"<b>TastyTrade Pick 2 — Iron Condor</b><br>Exp {tt_exp} ({days_to(tt_exp)} DTE, target 42)<br>"
-                     f"{fmt_condor(tt_ic)}<br><i>Plan: manage/close at 21 DTE.</i>", "#1f3a2e", "#4ad991")
+    if tt_ic and tt_ic["pop"] >= MIN_POP:
+        pop_color_block(f"<b>TastyTrade Pick 2 — Iron Condor</b><br>Exp {tt_exp} ({days_to(tt_exp)} DTE, target 42)<br>"
+                         f"{fmt_condor(tt_ic)}<br><i>Plan: manage/close at 21 DTE.</i>", tt_ic["pop"])
         tt_count += 1
 
-# two more: a slightly tighter and a slightly wider condor as alternates
-for dl, label in [(0.20, "TastyTrade Pick 3 — Wider Iron Condor (0.20Δ)"),
-                   (0.10, "TastyTrade Pick 4 — Tighter Iron Condor (0.10Δ)")]:
-    if tt_exp:
+    # two more: a slightly tighter and a slightly wider condor as alternates
+    for dl, label in [(0.20, "TastyTrade Pick 3 — Wider Iron Condor (0.20Δ)"),
+                       (0.10, "TastyTrade Pick 4 — Tighter Iron Condor (0.10Δ)")]:
         ic = build_iron_condor(puts, calls, S, T, dl)
-        if ic:
-            color_block(f"<b>{label}</b><br>Exp {tt_exp} ({days_to(tt_exp)} DTE)<br>{fmt_condor(ic)}",
-                         "#1f3a2e", "#4ad991")
+        if ic and ic["pop"] >= MIN_POP:
+            pop_color_block(f"<b>{label}</b><br>Exp {tt_exp} ({days_to(tt_exp)} DTE)<br>{fmt_condor(ic)}", ic["pop"])
+            tt_count += 1
+
+if tt_count == 0:
+    st.write(f"No TastyTrade-style structure cleared POP ≥ {MIN_POP}% on this chain right now.")
 
 # ----------------------------------------------------------------------
 # SECTION: Weekend Play
@@ -523,13 +583,14 @@ else:
         T = max(days_to(exp), 0.5) / 365
         puts, calls = get_chain(ticker, exp)
         wk_sp = build_bull_put_spread(puts, S, T, 0.15)
-        if wk_sp:
-            st.write(f"**{ticker} Weekend Bull Put Spread** — Exp {exp} ({days_to(exp)} DTE)  \n"
-                     f"{fmt_spread(wk_sp)}  \n"
-                     "Plan: open Thursday/Friday, close Monday morning/afternoon to capture weekend theta decay "
-                     "while the underlying is untraded.")
+        if wk_sp and wk_sp["pop"] >= MIN_POP:
+            pop_color_block(
+                f"<b>{ticker} Weekend Bull Put Spread</b> — Exp {exp} ({days_to(exp)} DTE)<br>"
+                f"{fmt_spread(wk_sp)}<br>"
+                "<i>Plan: open Thursday/Friday, close Monday morning/afternoon to capture weekend theta decay "
+                "while the underlying is untraded.</i>", wk_sp["pop"])
         else:
-            st.write("No qualifying spread found for the weekend play on this chain.")
+            st.write(f"No weekend-play spread cleared POP ≥ {MIN_POP}% on this chain right now.")
     else:
         st.write("No near-term Friday expiration available for this ticker.")
 
