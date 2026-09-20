@@ -7,6 +7,9 @@ Educational options-strategy dashboard. **Not financial advice.** Built with
 Enter a ticker, and the app pulls its live option chain from Yahoo Finance and computes,
 using Black-Scholes delta and lognormal probability-of-profit (POP) math:
 
+- **Defaults to SPX** (`^SPX` — cash-settled S&P 500 index options, $100 multiplier).
+  Type "SPX" without the caret and it auto-corrects; type any other optionable ticker
+  (SPY, AAPL, ...) to analyze that instead.
 - Bull put spreads at ~0.20 / 0.13 / 0.11 short-leg delta across 7/14/21/30/41 DTE
 - Predicted 1-day / 7-day / 14-day / 21-day trading range (from implied volatility), plus
   live news headlines for the ticker
@@ -19,8 +22,20 @@ using Black-Scholes delta and lognormal probability-of-profit (POP) math:
   (managed-at-21-DTE), color-highlighted
 - **Weekend Play** — a Thursday/Friday-entry, Monday-exit theta play (only appears
   Thu/Fri/weekend; shows "Will start work on Thursday" earlier in the week)
-- A second page, **SPY/VIX Predictor**, using the VIX term structure (VIX / VIX9D / VIX3M)
-  to gauge near-term expected range and market stress
+- A second page, **SPX/VIX Predictor**, using the VIX term structure (VIX / VIX9D / VIX3M)
+  to gauge near-term expected SPX range and market stress — VIX is itself derived from
+  SPX option prices, so this pairing is more consistent than VIX-vs-SPY
+
+### A note on SPX specifically
+- Yahoo's symbol for S&P 500 index options is `^SPX` (the caret matters — `SPX` alone is a
+  different/no instrument on Yahoo). The app normalizes a plain `SPX` typed into the ticker
+  box to `^SPX` automatically.
+- SPX strikes are listed in coarser increments (commonly 5 points, wider further from the
+  money) than a single-digit-dollar ETF like SPY, so the **Poor Man's Pick** $100/$200
+  margin targets are hit less precisely — the app still finds the closest available strike,
+  it just won't always land exactly on $100/$200.
+- SPX options are index options: cash-settled and European-style (no early assignment risk),
+  unlike SPY which is an ETF with American-style, physically-settled options.
 
 ### POP floor and color coding
 Every trade the app shows anywhere — tables and highlighted picks alike — is pre-filtered
@@ -62,7 +77,7 @@ options_by_claude/                 <- repo root
 ├── .streamlit/
 │   └── config.toml                <- forces dark theme; must be named exactly this
 ├── pages/                          <- extra pages for multipage nav — folder name is fixed
-│   └── 1_SPY_VIX_Predictor.py     <- leading "1_" controls its position in the sidebar
+│   └── 1_SPX_VIX_Predictor.py     <- leading "1_" controls its position in the sidebar
 └── README.md
 ```
 
@@ -95,7 +110,7 @@ git remote add origin https://github.com/<your-username>/<your-repo>.git
 git push -u origin main
 ```
 Make sure the layout above survived the push (check on github.com that `app.py`,
-`requirements.txt`, `.streamlit/config.toml`, and `pages/1_SPY_VIX_Predictor.py` are all
+`requirements.txt`, `.streamlit/config.toml`, and `pages/1_SPX_VIX_Predictor.py` are all
 there at the paths shown) — a misplaced file is the #1 cause of Streamlit Cloud deploys
 that "work" but show a blank sidebar or a plain white (light-mode) page.
 
@@ -104,7 +119,7 @@ that "work" but show a blank sidebar or a plain white (light-mode) page.
 2. Go to https://share.streamlit.io and sign in with GitHub.
 3. Click **"New app,"** pick your repo and branch, and set **Main file path** to `app.py`.
 4. Click **Deploy**. Streamlit Cloud installs `requirements.txt` automatically, picks up
-   `.streamlit/config.toml` for the dark theme, and finds `pages/1_SPY_VIX_Predictor.py`
+   `.streamlit/config.toml` for the dark theme, and finds `pages/1_SPX_VIX_Predictor.py`
    for the sidebar — no extra config needed. You'll get a public `*.streamlit.app` URL.
 5. Any future `git push` to the deployed branch auto-redeploys the app.
 

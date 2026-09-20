@@ -1,5 +1,5 @@
 """
-SPY / VIX Predictor page.
+SPX / VIX Predictor page.
 EDUCATIONAL ONLY — this is a heuristic volatility/range model, not a crystal ball.
 """
 
@@ -9,12 +9,13 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 
-st.set_page_config(page_title="SPY-VIX Predictor", layout="wide")
-st.title("📊 SPY / VIX Predictor")
+st.set_page_config(page_title="SPX-VIX Predictor", layout="wide")
+st.title("📊 SPX / VIX Predictor")
 st.caption(
-    "Heuristic tool combining SPY price action with the VIX term structure "
+    "Heuristic tool combining SPX price action with the VIX term structure "
     "(spot VIX vs. 9-day and 3-month VIX) to gauge near-term expected range and "
-    "whether the market is pricing calm (contango) or stress (backwardation). "
+    "whether the market is pricing calm (contango) or stress (backwardation). VIX is "
+    "itself derived from SPX option prices, so this is the more natural pairing than SPY. "
     "Not a prediction of direction — educational only."
 )
 
@@ -33,13 +34,13 @@ def get_last(ticker):
         return None
     return float(h["Close"].iloc[-1]) if not h.empty else None
 
-spy = get_last("SPY")
+spx = get_last("^SPX")
 vix = get_last("^VIX")
 vix9d = get_last("^VIX9D")
 vix3m = get_last("^VIX3M")
 
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("SPY", f"${spy:,.2f}" if spy else "N/A")
+col1.metric("SPX", f"{spx:,.2f}" if spx else "N/A")
 col2.metric("VIX (spot)", f"{vix:.2f}" if vix else "N/A")
 col3.metric("VIX9D", f"{vix9d:.2f}" if vix9d else "N/A")
 col4.metric("VIX3M", f"{vix3m:.2f}" if vix3m else "N/A")
@@ -54,21 +55,21 @@ if vix and vix9d and vix3m:
     else:
         st.info("Mixed term structure — no strong signal either way.")
 
-    if spy:
-        st.subheader("Expected SPY Range (from VIX)")
+    if spx:
+        st.subheader("Expected SPX Range (from VIX)")
         rows = []
         for label, days in [("1 day", 1), ("7 days", 7), ("14 days", 14), ("21 days", 21), ("30 days", 30)]:
             sigma = vix / 100
-            move = spy * sigma * np.sqrt(days / 365)
-            rows.append({"Horizon": label, "Low": round(spy - move, 2), "High": round(spy + move, 2),
+            move = spx * sigma * np.sqrt(days / 365)
+            rows.append({"Horizon": label, "Low": round(spx - move, 2), "High": round(spx + move, 2),
                          "±1σ Move": round(move, 2)})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         st.caption("1-standard-deviation lognormal range implied by spot VIX (~68% confidence band).")
 else:
     st.info("Couldn't pull full VIX term structure data right now.")
 
-st.subheader("Recent SPY Price Action")
-hist = get_hist("SPY", "3mo")
+st.subheader("Recent SPX Price Action")
+hist = get_hist("^SPX", "3mo")
 if not hist.empty:
     st.line_chart(hist["Close"])
 

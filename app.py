@@ -296,7 +296,18 @@ st.caption(
     f"to POP ≥ {MIN_POP}% — anything that didn't clear that bar is left off the page entirely."
 )
 
-ticker = st.text_input("Ticker to analyze", value="SPY").upper().strip()
+# Common index tickers people type without Yahoo's required "^" prefix.
+INDEX_ALIASES = {"SPX": "^SPX", "VIX": "^VIX", "NDX": "^NDX", "RUT": "^RUT", "DJI": "^DJI"}
+
+ticker_raw = st.text_input(
+    "Ticker to analyze",
+    value="^SPX",
+    help='Defaults to SPX (S&P 500 index options, cash-settled, $100 multiplier). '
+         'Type any other optionable ticker, e.g. SPY, AAPL — "SPX" without the caret is '
+         'auto-corrected to "^SPX".',
+).upper().strip()
+ticker = INDEX_ALIASES.get(ticker_raw, ticker_raw)
+ticker_display = ticker.lstrip("^")  # cosmetic only — API calls always use `ticker`
 
 S = get_price(ticker)
 if S is None:
@@ -308,7 +319,7 @@ if not expirations:
     st.error("No options chain found for that ticker (it may not have listed options).")
     st.stop()
 
-st.metric(f"{ticker} Last Price", f"${S:,.2f}")
+st.metric(f"{ticker_display} Last Price", f"${S:,.2f}")
 
 # ----------------------------------------------------------------------
 # SECTION: Bull Put Spreads across DTEs / deltas
@@ -412,7 +423,7 @@ for margin in (200, 100):
     st.subheader(f"${margin} Margin Pick")
     if pick:
         pop_color_block(
-            f"<b>{ticker} Bull Put Spread</b> — Exp {pick['expiration']} ({pick['dte']} DTE)<br>"
+            f"<b>{ticker_display} Bull Put Spread</b> — Exp {pick['expiration']} ({pick['dte']} DTE)<br>"
             f"Sell {pick['short_strike']}P / Buy {pick['long_strike']}P<br>"
             f"Credit: ${pick['credit']} | Max Loss: ${pick['max_loss']} | POP ≈ {pick['pop']}%",
             pick["pop"],
@@ -471,7 +482,7 @@ for dte in [1, 7, 14, 21, 30, 41, 42]:
             if best_condor is None or ic["max_gain"] > best_condor["max_gain"]:
                 best_condor, best_condor_meta = ic, {"exp": exp, "dte": days_to(exp), "delta": dl}
 if best_condor:
-    pop_color_block(f"<b>{ticker} Iron Condor</b> — Exp {best_condor_meta['exp']} ({best_condor_meta['dte']} DTE)<br>"
+    pop_color_block(f"<b>{ticker_display} Iron Condor</b> — Exp {best_condor_meta['exp']} ({best_condor_meta['dte']} DTE)<br>"
                      + fmt_condor(best_condor), best_condor["pop"])
 else:
     st.write("No condor cleared 80% POP across scanned deltas/DTEs on this chain — market may be too volatile "
@@ -484,7 +495,7 @@ if pick30_exp:
     puts30, _ = get_chain(ticker, pick30_exp)
     bps_pick = build_bull_put_spread(puts30, S, days_to(pick30_exp) / 365, 0.20)
 if bps_pick and bps_pick["pop"] >= MIN_POP:
-    pop_color_block(f"<b>{ticker} Bull Put Spread</b> (30 DTE, ~0.20Δ)<br>" + fmt_spread(bps_pick), bps_pick["pop"])
+    pop_color_block(f"<b>{ticker_display} Bull Put Spread</b> (30 DTE, ~0.20Δ)<br>" + fmt_spread(bps_pick), bps_pick["pop"])
 else:
     st.write(f"The ~0.20Δ / 30 DTE bull put spread didn't clear POP ≥ {MIN_POP}% on this chain right now.")
 
@@ -585,7 +596,7 @@ else:
         wk_sp = build_bull_put_spread(puts, S, T, 0.15)
         if wk_sp and wk_sp["pop"] >= MIN_POP:
             pop_color_block(
-                f"<b>{ticker} Weekend Bull Put Spread</b> — Exp {exp} ({days_to(exp)} DTE)<br>"
+                f"<b>{ticker_display} Weekend Bull Put Spread</b> — Exp {exp} ({days_to(exp)} DTE)<br>"
                 f"{fmt_spread(wk_sp)}<br>"
                 "<i>Plan: open Thursday/Friday, close Monday morning/afternoon to capture weekend theta decay "
                 "while the underlying is untraded.</i>", wk_sp["pop"])
